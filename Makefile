@@ -1,11 +1,19 @@
 CC = g++
-CFLAGS = -Wall -g -std=c++17
+CFLAGS=-g -Wall -Wextra -O -std=c++17 -pthread
 
-all: mailer
+all: ./bin/twmailer-server ./bin/twmailer-client
 
-mailer: mailer.cpp
-	$(CC) $(CFLAGS) -o mailer mailer.cpp
+./obj/twmailer-client.o: twmailer-client.cpp
+	${CC} ${CFLAGS} -o obj/twmailer-client.o twmailer-client.cpp -c
+
+./obj/twmailer-server.o: twmailer-server.cpp
+	${CC} ${CFLAGS} -o obj/twmailer-server.o twmailer-server.cpp -c 
+
+./bin/twmailer-server: ./obj/twmailer-server.o
+	${CC} ${CFLAGS} -o bin/twmailer-server obj/twmailer-server.o
+
+./bin/twmailer-client: ./obj/twmailer-client.o
+	${CC} ${CFLAGS} -o bin/twmailer-client obj/twmailer-client.o
 
 clean:
-	rm -f mailer
-
+	rm -f bin/* obj/*
