@@ -1,4 +1,5 @@
 #include <sys/types.h>
+#include <sys/file.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -13,16 +14,24 @@
 #include <filesystem>
 #include <fstream>
 #include <regex>
-
-namespace fs = std::filesystem;
-
-int create_socket = -1;
-int current_socket = -1;
+#include <signal.h>
+#include <sys/wait.h>
 
 //directory where the mail data will be stored, passed as argument when starting server
 char* dataDirectory;
 
-void socketLogic(int* current_socket);
+namespace fs = std::filesystem;
+int fileLock; //file descriptor for dataDirectory, used to lock entire filesystem
+void lock(); //lock filesystem
+void unlock(); //unlock filesystem
+
+void signalHandler(int sig);
+
+int create_socket = -1;
+int current_socket = -1;
+pid_t pid = -1;
+
+void connectionLogic();
 
 //before sending the actual message, another message containing the size of the actual message is sent,
 //so that the client can allocate memory for the message and messages are not limited in size
@@ -57,11 +66,20 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    dataDirectory = argv[2];
+    if (signal(SIGINT, signalHandler) == SIG_ERR) {
+        perror("signal can not be registered");
+        exit(EXIT_FAILURE);
+    }
+
+    if (signal(SIGUSR1, signalHandler) == SIG_ERR) {
+        perror("signal can not be registered");
+        exit(EXIT_FAILURE);
+    }
 
     socklen_t addrlen;
     struct sockaddr_in address, cliaddress;
-    int new_socket = -1;
+    
+    dataDirectory = argv[2];
 
     //make sure that data directory exists
     fs::path p{dataDirectory};
@@ -99,28 +117,32 @@ int main(int argc, char *argv[]) {
       exit(EXIT_FAILURE);
     }
 
+    printf("Waiting for connections...\n");
+    
     while (1)
     {
-        printf("Waiting for connections...\n");
         addrlen = sizeof(struct sockaddr_in);
-        if ((new_socket = accept(create_socket, (struct sockaddr *)&cliaddress, &addrlen)) == -1) {
+        if ((current_socket = accept(create_socket, (struct sockaddr *)&cliaddress, &addrlen)) == -1) {
             perror("accept");
             break;
         }
 
-        printf("Client connected from %s:%d\n",
-                inet_ntoa(cliaddress.sin_addr),
-                ntohs(cliaddress.sin_port));
-        socketLogic(&new_socket);
-        close(new_socket);
+        if((pid = fork()) == 0){   
+            close(create_socket);
+            printf("\nClient connected from %s:%d\n", inet_ntoa(cliaddress.sin_addr), ntohs(cliaddress.sin_port));
+            printf("Client will be handled by child process %d\n", getpid());
+            connectionLogic();
+            kill(getppid(), SIGUSR1); //send custom signal to parent process before exiting child process
+            exit(EXIT_SUCCESS);
+        } else {
+            close(current_socket);
+        }
     }
 
     exit(EXIT_SUCCESS);
 }
 
-void socketLogic(int* new_socket){
-
-    current_socket = *new_socket;
+void connectionLogic(){
 
     std::string stringBuffer;
 
@@ -128,6 +150,12 @@ void socketLogic(int* new_socket){
 
     //sends Message from stringBuffer
     if(!sendMessage(&stringBuffer)){
+        return;
+    };
+
+    //set up file descriptor for file lock
+    if((fileLock = open(fs::path(dataDirectory).string().c_str(), O_DIRECTORY, O_RDWR)) == -1){
+        perror("open");
         return;
     };
 
@@ -140,18 +168,19 @@ void socketLogic(int* new_socket){
 
         //receaves message and saves message in stringBuffer
         if(!receiveMessage(&stringBuffer)){
-            break;
+            return;
         };
 
         if(stringBuffer == "QUIT\n"){
-            break;
+            printf("\nClient sent QUIT\n");
+            return;
         }
         
         //processes input, does logic and writes response to stringBuffer
         mailerLogic(&stringBuffer);
 
         if(!sendMessage(&stringBuffer)){
-            break;
+            return;
         };
 
     }
@@ -161,7 +190,7 @@ void socketLogic(int* new_socket){
 
 void mailerLogic(std::string* stringBuffer){
 
-    std::cout << "Received from client: " << *stringBuffer << "\n";
+    //std::cout << "Received from client: " << *stringBuffer << "\n";
 
     std::istringstream inputString(*stringBuffer);
     std::string line;
@@ -231,6 +260,8 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
     p /= receiver; //add receiver to path
 
+    lock();
+         
     create_directory(p); //ok to use even if directory already exists
 
     //count number of messages for new message-id
@@ -256,6 +287,8 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
     emailFile.close();
 
+    unlock();
+
     *stringBuffer = "OK\n";
 }
 
@@ -272,6 +305,8 @@ void list(std::string* stringBuffer, std::istringstream &inputString, std::strin
         *stringBuffer = "ERR\n";
         return;
     }
+
+    lock();
 
     if(!fs::exists(p)){
         *stringBuffer = "0\n";
@@ -294,6 +329,7 @@ void list(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
         *stringBuffer += "<" + email.path().filename().string() + "> " + line + "\n";
     }
+    unlock();
     stringBuffer->insert(0, std::to_string(numberOfMessages) + "\n"); //write number of messages into first line of stringBuffer
 }
 
@@ -314,6 +350,8 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
     std::getline(inputString,line);
     p /= line; //add message-id to path
 
+    lock();
+    
     if(!fs::exists(p)){
         *stringBuffer = "ERR\n";
         return;
@@ -331,6 +369,8 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
         emailFile.close();
     }
+
+    unlock();
 }
 
 void del(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
@@ -350,12 +390,17 @@ void del(std::string* stringBuffer, std::istringstream &inputString, std::string
     std::getline(inputString,line);
     p /= line; //add message-id to path
 
+    lock();
+    
     if(!fs::exists(p)){
         *stringBuffer = "ERR\n";
         return;
     }
 
     fs::remove(p);
+
+    unlock();
+
     *stringBuffer += "OK\n";
 }
 
@@ -435,7 +480,7 @@ int receiveMessage(std::string* stringBuffer){
         return false;
     }
     if (bytesReceived == (unsigned)0) {
-        printf("Client closed remote socket\n");
+        printf("\nClient closed remote socket\n");
         return false;
     }
     if (bytesReceived != sizeof(uint32_t)) {
@@ -458,7 +503,7 @@ int receiveMessage(std::string* stringBuffer){
         return false;
     }
     if (bytesReceived == (unsigned)0) {
-        printf("Client closed remote socket\n");
+        printf("\nClient closed remote socket\n");
         return false;
     }
     if (bytesReceived != lengthOfMessage) {
@@ -487,4 +532,48 @@ bool checkSubject(std::string &subject){
      }
 
      return false;
+}
+
+void signalHandler(int sig) {
+
+    if(sig == SIGUSR1){
+        pid_t cpid;
+        int status;
+        cpid = wait(&status);
+        printf("Child process with id %d exited with code %d\n", cpid, status);
+        return;
+    }
+    
+    if(sig == SIGINT){
+
+        if(pid == 0){
+            exit(EXIT_SUCCESS);
+        }
+
+        printf("\nStopping server...\n");
+        pid_t cpid;
+        int status;
+        while((cpid = wait(&status)) > 0){ //waits for all child processes to exit
+            printf("Child process with id %d exited with code %d\n", cpid, status);
+        };
+
+        exit(EXIT_SUCCESS);
+
+    }
+
+    exit(sig);
+}
+
+void lock(){ 
+    if(flock(fileLock, LOCK_EX) != 0){
+        perror("flock");
+        exit(EXIT_FAILURE);
+    };
+}
+
+void unlock(){ 
+    if(flock(fileLock, LOCK_UN) != 0){
+        perror("flock");
+        exit(EXIT_FAILURE);
+    };
 }
