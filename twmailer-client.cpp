@@ -10,14 +10,10 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
-#include <signal.h>
 
 int create_socket = -1;
 std::string stringBuffer;
 std::string input;
-
-//needed for handling ctrl+c interrupt for shutting down the server
-void signalHandler(int sig);
 
 //enables switch case for commands
 int stringCommandToEnum(std::string input);
@@ -39,8 +35,6 @@ void getLineToBuffer();
 void sendMessage(); //sends message from stringBuffer to server
 void receiveMessage(); //receives message from server and writes it to stringBuffer
 
-void closeSocketAndExit();
-
 int main(int argc, char *argv[]) {
 
     
@@ -49,16 +43,11 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    if (signal(SIGINT, signalHandler) == SIG_ERR) {
-        perror("signal can not be registered");
-        return EXIT_FAILURE;
-    }
-
     struct sockaddr_in address;
 
     if ((create_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1){
         perror("Socket error");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     memset(&address, 0, sizeof(address));
@@ -68,7 +57,7 @@ int main(int argc, char *argv[]) {
 
     if (connect(create_socket, (struct sockaddr *)&address, sizeof(address)) == -1) {
         perror("Connect error - no server available");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     printf("Connection with server (%s) established\n", inet_ntoa(address.sin_addr));
@@ -129,7 +118,7 @@ int main(int argc, char *argv[]) {
         sendMessage();
 
         if (stringBuffer == "QUIT\n") {
-            closeSocketAndExit();
+            exit(EXIT_SUCCESS);
         }
 
         //receive Message from Server and copy message to stringBuffer
@@ -138,11 +127,8 @@ int main(int argc, char *argv[]) {
         std::cout << "<< " << stringBuffer << "\n";
     }
 
-    closeSocketAndExit();
-
-
     return 0;
-    
+    exit(EXIT_SUCCESS);   
 }
 
 void sendMessage(){
@@ -160,12 +146,12 @@ void sendMessage(){
             perror("send error");
         }
         printf("Stopping client...\n");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     };
 
     if(bytesSent != sizeof(uint32_t)){
         printf("Error - could not send length of message.\n");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     };
 
     //sends actual message
@@ -185,7 +171,7 @@ void sendMessage(){
                 perror("send error");
             }
             printf("Stopping client...\n");
-            closeSocketAndExit();
+            exit(EXIT_FAILURE);
         };
 
         bytesLeft -= bytesSent;
@@ -201,15 +187,15 @@ void receiveMessage(){
     bytesReceived = recv(create_socket, &lengthOfMessage, sizeof(uint32_t),0);
     if (bytesReceived == (unsigned)-1) {
         perror("recv error");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
     if (bytesReceived == (unsigned)0) {
         printf("Server closed remote socket\n"); // ignore error
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
     if (bytesReceived != sizeof(uint32_t)) {
         printf("Error - could not receive length of message.\n");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
     lengthOfMessage = ntohl(lengthOfMessage);
 
@@ -224,36 +210,19 @@ void receiveMessage(){
     bytesReceived = recv(create_socket, receiveBuffer.data(), lengthOfMessage, MSG_WAITALL);
     if (bytesReceived == (unsigned)-1) {
         perror("recv error");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
     if (bytesReceived == (unsigned)0) {
         printf("Server closed remote socket\n");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
     if (bytesReceived != lengthOfMessage) {
         printf("Received message is shorter than message size.\n");
-        closeSocketAndExit();
+        exit(EXIT_FAILURE);
     }
 
     //load message into stringBuffer
     stringBuffer.assign(receiveBuffer.data(), receiveBuffer.size());
-}
-
-void closeSocketAndExit(){
-    if (create_socket != -1)
-    {
-        if (shutdown(create_socket, SHUT_RDWR) == -1) {
-            if(errno != ENOTCONN ){
-                perror("shutdown create_socket"); 
-            }
-        }
-        if (close(create_socket) == -1) {
-            perror("close create_socket");
-        }
-        create_socket = -1;
-    }
-
-    exit(EXIT_SUCCESS);
 }
 
 void getLineToBuffer(){
@@ -283,16 +252,4 @@ int stringCommandToEnum(std::string input){
     }
 
     return 6;
-}
-
-void signalHandler(int sig) {
-    if (sig == SIGINT)
-    {
-        printf("\nStopping client...\n");
-        closeSocketAndExit();
-    }
-    else
-    {
-        exit(sig);
-    }
 }

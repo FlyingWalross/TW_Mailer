@@ -6,7 +6,6 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
-#include <signal.h>
 #include <string>
 #include <iostream>
 #include <sstream>
@@ -17,10 +16,6 @@
 
 namespace fs = std::filesystem;
 
-//needed for handling ctrl+c interrupt for shutting down the server
-void signalHandler(int sig);
-
-int abortRequested = 0;
 int create_socket = -1;
 int current_socket = -1;
 
@@ -28,9 +23,6 @@ int current_socket = -1;
 char* dataDirectory;
 
 void socketLogic(int* current_socket);
-void closeCreateSocket();
-void closeCurrentSocket();
-
 
 //before sending the actual message, another message containing the size of the actual message is sent,
 //so that the client can allocate memory for the message and messages are not limited in size
@@ -71,29 +63,24 @@ int main(int argc, char *argv[]) {
     struct sockaddr_in address, cliaddress;
     int new_socket = -1;
 
-   if (signal(SIGINT, signalHandler) == SIG_ERR) {
-      perror("signal can not be registered");
-      return EXIT_FAILURE;
-   }
-
     //make sure that data directory exists
     fs::path p{dataDirectory};
     create_directory(p); //ok to use even if directory already exists
 
     if ((create_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         perror("Error creating socket");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
     
     int option_value = 1;
     if (setsockopt(create_socket, SOL_SOCKET, SO_REUSEADDR, &option_value, sizeof(option_value)) == -1) {
         perror("set socket options - reuseAddr");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     if (setsockopt(create_socket, SOL_SOCKET, SO_REUSEPORT, &option_value, sizeof(option_value)) == -1) {
         perror("set socket options - reusePort");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     memset(&address, 0, sizeof(address));
@@ -103,23 +90,21 @@ int main(int argc, char *argv[]) {
 
     if (bind(create_socket, (struct sockaddr *)&address, sizeof(address)) == -1) {
         perror("bind error");
-        return EXIT_FAILURE;
+        exit(EXIT_FAILURE);
     }
 
     if (listen(create_socket, 5) == -1)
     {
       perror("listen error");
-      return EXIT_FAILURE;
+      exit(EXIT_FAILURE);
     }
 
-    while (!abortRequested)
+    while (1)
     {
         printf("Waiting for connections...\n");
         addrlen = sizeof(struct sockaddr_in);
         if ((new_socket = accept(create_socket, (struct sockaddr *)&cliaddress, &addrlen)) == -1) {
-            if (!abortRequested) {
-                perror("accept error");
-            }
+            perror("accept");
             break;
         }
 
@@ -127,11 +112,10 @@ int main(int argc, char *argv[]) {
                 inet_ntoa(cliaddress.sin_addr),
                 ntohs(cliaddress.sin_port));
         socketLogic(&new_socket);
-        new_socket = -1;
+        close(new_socket);
     }
 
-    closeCreateSocket();
-    return EXIT_SUCCESS;
+    exit(EXIT_SUCCESS);
 }
 
 void socketLogic(int* new_socket){
@@ -144,7 +128,6 @@ void socketLogic(int* new_socket){
 
     //sends Message from stringBuffer
     if(!sendMessage(&stringBuffer)){
-        closeCurrentSocket();
         return;
     };
 
@@ -153,7 +136,7 @@ void socketLogic(int* new_socket){
     // 2. the message is then processed by mailerLogic(),
     // 3. the answer is sent with sendMessage()
     // 4. repeat
-    while(!abortRequested){
+    while(1){
 
         //receaves message and saves message in stringBuffer
         if(!receiveMessage(&stringBuffer)){
@@ -172,8 +155,7 @@ void socketLogic(int* new_socket){
         };
 
     }
-
-    closeCurrentSocket();
+    
     return;
 }
 
@@ -377,52 +359,6 @@ void del(std::string* stringBuffer, std::istringstream &inputString, std::string
     *stringBuffer += "OK\n";
 }
 
-void closeCreateSocket(){
-    if (create_socket != -1)
-    {
-        if (shutdown(create_socket, SHUT_RDWR) == -1)
-        {
-            perror("shutdown create_socket");
-        }
-        if (close(create_socket) == -1)
-        {
-            perror("close create_socket");
-        }
-        create_socket = -1;
-    }
-}
-
-void closeCurrentSocket(){
-    if (current_socket != -1)
-    {
-        if (shutdown(current_socket, SHUT_RDWR) == -1)
-        {
-            perror("shutdown current_socket");
-        }
-        if (close(current_socket) == -1)
-        {
-            perror("close current_socket");
-        }
-        current_socket = -1;
-    }
-}
-
-void signalHandler(int sig) {
-    if (sig == SIGINT)
-    {
-        printf("\nStopping server...\n"); // ignore error
-        abortRequested = 1;
-
-        closeCreateSocket();
-        closeCurrentSocket();
-
-    }
-    else
-    {
-        exit(sig);
-    }
-}
-
 int stringCommandToEnum(std::string functionString){
     if (functionString == "SEND") {
         return 1;
@@ -494,9 +430,6 @@ int receiveMessage(std::string* stringBuffer){
     uint32_t  lengthOfMessage;
     uint32_t bytesReceived = -1;
     bytesReceived = recv(current_socket, &lengthOfMessage, sizeof(uint32_t),0);
-    if (abortRequested) {
-        return false;
-    }
     if (bytesReceived == (unsigned)-1) {
         perror("recv error");
         return false;
@@ -520,10 +453,6 @@ int receiveMessage(std::string* stringBuffer){
 
     //MSG_WAITALL is set so recv waits until entire message is received
     bytesReceived = recv(current_socket, receiveBuffer.data(), lengthOfMessage, MSG_WAITALL);
-    if (abortRequested) {
-        perror("recv error after aborted");
-        return false;
-    }
     if (bytesReceived == (unsigned)-1) {
         perror("recv error");
         return false;
