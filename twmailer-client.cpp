@@ -10,6 +10,8 @@
 #include <iostream>
 #include <sstream>
 #include <vector>
+#include <ldap.h>
+#include "ldapAuthSrc/mypw.h"
 
 int create_socket = -1;
 std::string stringBuffer;
@@ -23,7 +25,8 @@ enum commands {
     READ = 3,
     DEL = 4,
     QUIT = 5,
-    ERROR = 6
+    ERROR = 6,
+    LOGIN = 7
 };
 
 //reads line and adds it to stringBuffer
@@ -73,9 +76,13 @@ int main(int argc, char *argv[]) {
         stringBuffer = input + "\n";
 
         switch (stringCommandToEnum(input)) {
-            case SEND:
-                printf("Enter sender (max. 8 chars):\n>> ");
+            
+            case LOGIN:
+                printf("Enter username\n>> ");
                 getLineToBuffer();
+                stringBuffer += getpass() + "\n";
+                break;
+            case SEND:
                 printf("Enter receiver (max. 8 chars):\n>> ");
                 getLineToBuffer();
                 printf("Enter subject (max. 80 chars):\n>> ");
@@ -88,20 +95,14 @@ int main(int argc, char *argv[]) {
                 break;
 
             case LIST:
-                printf("Enter username (max. 8 chars):\n>> ");
-                getLineToBuffer();
                 break;
 
             case READ:
-                printf("Enter username (max. 8 chars):\n>> ");
-                getLineToBuffer();
                 printf("Enter message number:\n>> ");
                 getLineToBuffer();
                 break;
 
             case DEL:
-                printf("Enter username (max. 8 chars):\n>> ");
-                getLineToBuffer();;
                 printf("Enter message number:\n>> ");
                 getLineToBuffer();
                 break;
@@ -249,6 +250,10 @@ int stringCommandToEnum(std::string input){
 
     if (input == "QUIT") {
         return 5;
+    }
+
+    if (input == "LOGIN") {
+        return 7;
     }
 
     return 6;

@@ -16,6 +16,12 @@
 #include <regex>
 #include <signal.h>
 #include <sys/wait.h>
+#include <ldap.h>
+#include "ldapAuthSrc/ldapAuth.h"
+#include <chrono>
+
+#define MAX_FAILED_LOGIN_ATTEMPTS 2
+#define IP_BLACKLIST_TIME 60 //in seconds
 
 //directory where the mail data will be stored, passed as argument when starting server
 char* dataDirectory;
@@ -50,14 +56,25 @@ enum commands {
     READ = 3,
     DEL = 4,
     QUIT = 5,
-    ERROR = 6
+    ERROR = 6,
+    LOGIN = 7
 };
 
 //function for the different mailer commands, used in mailerLogic()
+void login(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
 void send(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
 void list(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
 void read(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
 void del(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
+
+//used for login and session
+bool loggedIn = false;
+std::string sessionUsername;
+std::string clientIP;
+
+bool checkIfIPisBlacklisted();
+void addFailedLoginAttempt();
+void addIPtoBlacklist();
 
 int main(int argc, char *argv[]) {
 
@@ -84,6 +101,9 @@ int main(int argc, char *argv[]) {
     //make sure that data directory exists
     fs::path p{dataDirectory};
     create_directory(p); //ok to use even if directory already exists
+
+    p /= "messages";
+    create_directory(p);
 
     if ((create_socket = socket(AF_INET, SOCK_STREAM, 0)) == -1) {
         perror("Error creating socket");
@@ -129,8 +149,9 @@ int main(int argc, char *argv[]) {
 
         if((pid = fork()) == 0){   
             close(create_socket);
+            clientIP.assign(inet_ntoa(cliaddress.sin_addr));
             printf("\nClient connected from %s:%d\n", inet_ntoa(cliaddress.sin_addr), ntohs(cliaddress.sin_port));
-            printf("Client will be handled by child process %d\n", getpid());
+            printf("Client with will be handled by child process %d\n", getpid());
             connectionLogic();
             kill(getppid(), SIGUSR1); //send custom signal to parent process before exiting child process
             exit(EXIT_SUCCESS);
@@ -199,6 +220,10 @@ void mailerLogic(std::string* stringBuffer){
     std::getline(inputString,line);
 
     switch (stringCommandToEnum(line)) {
+        case LOGIN:
+            login(stringBuffer, inputString, line);
+            break;
+
         case SEND:
             send(stringBuffer, inputString, line);
             break;
@@ -225,22 +250,58 @@ void mailerLogic(std::string* stringBuffer){
 
 }
 
-void send(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
-
-    std::string sender;
-    std::string receiver;
-    std::string subject;
-
-    std::getline(inputString,sender);
-    std::getline(inputString,receiver);
-    std::getline(inputString,subject);
-
-    //check if sender username is valid (min. 1, max. 8 chars, no special chars)
-    if(!checkUsername(sender)){
-        printf("username is not valid!\n");
+void login(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+    
+    if(checkIfIPisBlacklisted()){
+        sessionUsername.clear();
+        loggedIn = false;
         *stringBuffer = "ERR\n";
         return;
     }
+    
+    std::string loginUsername;
+    std::string loginPassword;
+    
+    std::getline(inputString, loginUsername);
+    std::getline(inputString, loginPassword);
+
+    //Test accounts for debugging
+    if((loginUsername == "test1" || loginUsername == "test2") && loginPassword == "test"){
+        printf("Client in child process %d sucessfully logged in as %s\n", getpid(), loginUsername.c_str());
+        sessionUsername = loginUsername;
+        loggedIn = true;
+        *stringBuffer = "OK\n";
+        return;
+    }
+    
+    //actual authentication with LDAP
+    if(LDAPauthenticate(loginUsername, loginPassword)){    
+        printf("Client in child process %d sucessfully logged in as %s\n", getpid(), loginUsername.c_str());
+        sessionUsername = loginUsername;
+        loggedIn = true;
+        *stringBuffer = "OK\n";
+        return;
+    }
+
+    addFailedLoginAttempt();
+
+    sessionUsername.clear();
+    loggedIn = false;
+    *stringBuffer = "ERR\n";
+}
+
+void send(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+
+    if(!loggedIn){
+        *stringBuffer = "ERR\n";
+        return;
+    }
+
+    std::string receiver;
+    std::string subject;
+
+    std::getline(inputString,receiver);
+    std::getline(inputString,subject);
 
     //check if receiver username is valid (min. 1, max. 8 chars, no special chars)
     if(!checkUsername(receiver)){
@@ -257,7 +318,7 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
     }
 
     fs::path p{dataDirectory};
-
+    p /= "messages";
     p /= receiver; //add receiver to path
 
     lock();
@@ -276,7 +337,7 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
     //create file and write data to file
     std::ofstream emailFile(p);
-    emailFile << sender << "\n";
+    emailFile << sessionUsername << "\n";
     emailFile << receiver << "\n";
     emailFile << subject << "\n";
 
@@ -294,22 +355,20 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
 void list(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
     
-    fs::path p{dataDirectory};
-
-    std::getline(inputString,line);
-    p /= line; //add username to path
-
-    //check if username is valid (min. 1, max. 8 chars, no special chars)
-    if(!checkUsername(line)){
-        printf("username is not valid!\n");
+    if(!loggedIn){
         *stringBuffer = "ERR\n";
         return;
     }
+    
+    fs::path p{dataDirectory};
+    p /= "messages";
+    p /= sessionUsername; //add username to path
 
     lock();
 
     if(!fs::exists(p)){
         *stringBuffer = "0\n";
+        unlock();
         return;
     }
 
@@ -335,17 +394,14 @@ void list(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
 void read(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
 
-    fs::path p{dataDirectory};
-
-    std::getline(inputString,line);
-    p /= line; //add username to path
-
-    //check if username is valid (min. 1, max. 8 chars, no special chars)
-    if(!checkUsername(line)){
-        printf("username is not valid!\n");
+    if(!loggedIn){
         *stringBuffer = "ERR\n";
         return;
     }
+    
+    fs::path p{dataDirectory};
+    p /= "messages";
+    p /= sessionUsername; //add username to path
     
     std::getline(inputString,line);
     p /= line; //add message-id to path
@@ -354,6 +410,7 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
     
     if(!fs::exists(p)){
         *stringBuffer = "ERR\n";
+        unlock();
         return;
     }
 
@@ -375,17 +432,14 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
 void del(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
 
-    fs::path p{dataDirectory};
-
-    std::getline(inputString,line);
-    p /= line; //add username to path
-
-    //check if username is valid (min. 1, max. 8 chars, no special chars)
-    if(!checkUsername(line)){
-        printf("username is not valid!\n");
+    if(!loggedIn){
         *stringBuffer = "ERR\n";
         return;
     }
+    
+    fs::path p{dataDirectory};
+    p /= "messages";
+    p /= sessionUsername; //add username to path
     
     std::getline(inputString,line);
     p /= line; //add message-id to path
@@ -394,6 +448,7 @@ void del(std::string* stringBuffer, std::istringstream &inputString, std::string
     
     if(!fs::exists(p)){
         *stringBuffer = "ERR\n";
+        unlock();
         return;
     }
 
@@ -423,6 +478,10 @@ int stringCommandToEnum(std::string functionString){
 
     if (functionString == "QUIT") {
         return 5;
+    }
+
+    if (functionString == "LOGIN") {
+        return 7;
     }
 
     return 6;
@@ -576,4 +635,111 @@ void unlock(){
         perror("flock");
         exit(EXIT_FAILURE);
     };
+}
+
+bool checkIfIPisBlacklisted(){
+    
+    fs::path p{dataDirectory};
+    p /= "blacklistedIPs";
+    p /= clientIP;
+
+    lock();
+    
+    if(!fs::exists(p)){ //if ip is already blacklisted
+        unlock();
+        return false;
+    }
+    
+    std::string line;
+    std::ifstream ipFile(p); 
+    getline (ipFile, line);
+    ipFile.close();
+    int timeOfBlacklist = stoi(line);
+    const auto clockNow = std::chrono::system_clock::now();
+    int currenttime = (int)std::chrono::duration_cast<std::chrono::seconds>(clockNow.time_since_epoch()).count();
+    if((currenttime - timeOfBlacklist) > IP_BLACKLIST_TIME){
+            fs::remove(p);
+            unlock();
+            return false;
+    }
+
+    printf("\nLogin attempt from blacklisted ip: %s\n", clientIP.c_str());
+    printf("IP is blocked for %d more seconds\n", IP_BLACKLIST_TIME - (currenttime - timeOfBlacklist));
+
+    unlock();
+    return true;
+}
+
+void addFailedLoginAttempt(){
+    
+    printf("\nFailed login attempt on ip: %s\n", clientIP.c_str());
+    
+    fs::path p{dataDirectory};
+    p /= "failedLoginAttempts";
+
+    lock();
+
+    create_directory(p); //ok to use even if directory already exists
+    
+    p /= clientIP;
+
+    if(fs::exists(p)){ //if ip already has failed attempts
+        std::ifstream ipFileRead(p); 
+        std::string line;
+        getline (ipFileRead, line);
+        int numberOfFailedAttempts = stoi(line);
+        if(numberOfFailedAttempts >= MAX_FAILED_LOGIN_ATTEMPTS){
+            addIPtoBlacklist();
+            fs::remove(p);
+            unlock();
+            return;
+        }
+        ipFileRead.close();
+
+        std::ofstream ipFileWrite(p);
+        ipFileWrite << numberOfFailedAttempts + 1 << "\n";
+        ipFileWrite.close();
+        unlock();
+        return;
+    }
+
+    //if file doesn't exist -> first failed attempt
+    //create file and write data to file
+    std::ofstream ipFile(p);
+    ipFile << 1 << "\n";
+
+    ipFile.close();
+
+    unlock();
+
+}
+
+void addIPtoBlacklist(){
+
+    printf("Client with ip %s had more than %d login attempts and will be blacklisted for %d seconds\n", clientIP.c_str(), MAX_FAILED_LOGIN_ATTEMPTS, IP_BLACKLIST_TIME);
+    
+    fs::path p{dataDirectory};
+    p /= "blacklistedIPs";
+
+    lock();
+
+    create_directory(p); //ok to use even if directory already exists
+    
+    p /= clientIP;
+
+    if(fs::exists(p)){ //if ip is already blacklisted
+        unlock();
+        return;
+    }
+
+    //if ip isn't blacklisted
+    //create file and write current timestamp
+    const auto clockNow = std::chrono::system_clock::now();
+    std::ofstream ipFile(p);
+    ipFile << std::chrono::duration_cast<std::chrono::seconds>(clockNow.time_since_epoch()).count() << '\n';
+    ipFile.close();
+
+    unlock();
+
+    return;
 }
