@@ -23,6 +23,17 @@
 #define MAX_FAILED_LOGIN_ATTEMPTS 2
 #define IP_BLACKLIST_TIME 60 //in seconds
 
+//commands
+#define SEND 1
+#define LIST 2
+#define READ 3
+#define DEL 4
+#define QUIT 5
+#define ERROR 6
+#define LOGIN 7
+
+int stringCommandToInt(std::string functionString); //enables switch case for commands
+
 //directory where the mail data will be stored, passed as argument when starting server
 char* dataDirectory;
 
@@ -39,33 +50,25 @@ pid_t pid = -1;
 
 void connectionLogic();
 
+std::string stringBuffer; //gloabl variable for input/output buffer
+std::string line;
+
 //before sending the actual message, another message containing the size of the actual message is sent,
 //so that the client can allocate memory for the message and messages are not limited in size
 //by a fixed buffer
-int sendMessage(std::string* stringBuffer); //sends message from stringBuffer to client
-int receiveMessage(std::string* stringBuffer); //receives message from client and writes it to stringBuffer
+int sendMessage(); //sends message from stringBuffer to client
+int receiveMessage(); //receives message from client and writes it to stringBuffer
 
-void mailerLogic(std::string* stringBuffer); //main logic for mailer functions
+void mailerLogic(); //main logic for mailer functions
 bool checkUsername(std::string &username); //checks if username is valid
 bool checkSubject(std::string &subject); //checks if email subject is valid
 
-int stringCommandToEnum(std::string functionString); //enables switch case with mailer function in mailerLogic()
-enum commands {
-    SEND = 1,
-    LIST = 2,
-    READ = 3,
-    DEL = 4,
-    QUIT = 5,
-    ERROR = 6,
-    LOGIN = 7
-};
-
-//function for the different mailer commands, used in mailerLogic()
-void login(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
-void send(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
-void list(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
-void read(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
-void del(std::string* stringBuffer, std::istringstream &inputString, std::string &line);
+//functions for the different mailer commands, used in mailerLogic()
+void login(std::istringstream &inputString);
+void send(std::istringstream &inputString);
+void list();
+void read(std::istringstream &inputString);
+void del(std::istringstream &inputString);
 
 //used for login and session
 bool loggedIn = false;
@@ -165,12 +168,10 @@ int main(int argc, char *argv[]) {
 
 void connectionLogic(){
 
-    std::string stringBuffer;
-
     stringBuffer = "Welcome to TWMailer!\n";
 
     //sends Message from stringBuffer
-    if(!sendMessage(&stringBuffer)){
+    if(!sendMessage()){
         return;
     };
 
@@ -188,7 +189,7 @@ void connectionLogic(){
     while(1){
 
         //receaves message and saves message in stringBuffer
-        if(!receiveMessage(&stringBuffer)){
+        if(!receiveMessage()){
             return;
         };
 
@@ -198,9 +199,9 @@ void connectionLogic(){
         }
         
         //processes input, does logic and writes response to stringBuffer
-        mailerLogic(&stringBuffer);
+        mailerLogic();
 
-        if(!sendMessage(&stringBuffer)){
+        if(!sendMessage()){
             return;
         };
 
@@ -209,53 +210,52 @@ void connectionLogic(){
     return;
 }
 
-void mailerLogic(std::string* stringBuffer){
+void mailerLogic(){
 
     //std::cout << "Received from client: " << *stringBuffer << "\n";
 
-    std::istringstream inputString(*stringBuffer);
-    std::string line;
-    stringBuffer->clear();
+    std::istringstream inputString(stringBuffer);
+    stringBuffer.clear();
 
     std::getline(inputString,line);
 
-    switch (stringCommandToEnum(line)) {
+    switch (stringCommandToInt(line)) {
         case LOGIN:
-            login(stringBuffer, inputString, line);
+            login(inputString);
             break;
 
         case SEND:
-            send(stringBuffer, inputString, line);
+            send(inputString);
             break;
 
         case LIST:
-            list(stringBuffer, inputString, line);
+            list();
             break;
 
         case READ:
-            read(stringBuffer, inputString, line);
+            read(inputString);
             break;
 
         case DEL:
-            del(stringBuffer, inputString, line);
+            del(inputString);
             break;
 
         case QUIT:
             break;
 
         case ERROR:
-            *stringBuffer = "ERROR - Command not recognized by server.";
+            stringBuffer = "ERROR - Command not recognized by server.";
             break;
     }
 
 }
 
-void login(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+void login(std::istringstream &inputString){
     
     if(checkIfIPisBlacklisted()){
         sessionUsername.clear();
         loggedIn = false;
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
     
@@ -270,7 +270,7 @@ void login(std::string* stringBuffer, std::istringstream &inputString, std::stri
         printf("Client in child process %d sucessfully logged in as %s\n", getpid(), loginUsername.c_str());
         sessionUsername = loginUsername;
         loggedIn = true;
-        *stringBuffer = "OK\n";
+        stringBuffer = "OK\n";
         return;
     }
     
@@ -279,7 +279,7 @@ void login(std::string* stringBuffer, std::istringstream &inputString, std::stri
         printf("Client in child process %d sucessfully logged in as %s\n", getpid(), loginUsername.c_str());
         sessionUsername = loginUsername;
         loggedIn = true;
-        *stringBuffer = "OK\n";
+        stringBuffer = "OK\n";
         return;
     }
 
@@ -287,13 +287,13 @@ void login(std::string* stringBuffer, std::istringstream &inputString, std::stri
 
     sessionUsername.clear();
     loggedIn = false;
-    *stringBuffer = "ERR\n";
+    stringBuffer = "ERR\n";
 }
 
-void send(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+void send(std::istringstream &inputString){
 
     if(!loggedIn){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
 
@@ -306,14 +306,14 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
     //check if receiver username is valid (min. 1, max. 8 chars, no special chars)
     if(!checkUsername(receiver)){
         printf("receiver is not valid!\n");
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
 
     //check if subject is valid (max. 80 chars)
     if(!checkSubject(subject)){
         printf("subject is not valid!\n");
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
 
@@ -350,13 +350,13 @@ void send(std::string* stringBuffer, std::istringstream &inputString, std::strin
 
     unlock();
 
-    *stringBuffer = "OK\n";
+    stringBuffer = "OK\n";
 }
 
-void list(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+void list(){
     
     if(!loggedIn){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
     
@@ -367,7 +367,7 @@ void list(std::string* stringBuffer, std::istringstream &inputString, std::strin
     lock();
 
     if(!fs::exists(p)){
-        *stringBuffer = "0\n";
+        stringBuffer = "0\n";
         unlock();
         return;
     }
@@ -386,16 +386,16 @@ void list(std::string* stringBuffer, std::istringstream &inputString, std::strin
             emailFile.close();
         }
 
-        *stringBuffer += "<" + email.path().filename().string() + "> " + line + "\n";
+        stringBuffer += "<" + email.path().filename().string() + "> " + line + "\n";
     }
     unlock();
-    stringBuffer->insert(0, std::to_string(numberOfMessages) + "\n"); //write number of messages into first line of stringBuffer
+    stringBuffer.insert(0, std::to_string(numberOfMessages) + "\n"); //write number of messages into first line of stringBuffer
 }
 
-void read(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+void read(std::istringstream &inputString){
 
     if(!loggedIn){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
     
@@ -409,7 +409,7 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
     lock();
     
     if(!fs::exists(p)){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         unlock();
         return;
     }
@@ -418,10 +418,10 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
     
     if (emailFile.is_open()) {
         
-        *stringBuffer += "OK\n";
+        stringBuffer += "OK\n";
         
         while(getline (emailFile,line)){
-            *stringBuffer += line + "\n";
+            stringBuffer += line + "\n";
         }
 
         emailFile.close();
@@ -430,10 +430,10 @@ void read(std::string* stringBuffer, std::istringstream &inputString, std::strin
     unlock();
 }
 
-void del(std::string* stringBuffer, std::istringstream &inputString, std::string &line){
+void del(std::istringstream &inputString){
 
     if(!loggedIn){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         return;
     }
     
@@ -447,7 +447,7 @@ void del(std::string* stringBuffer, std::istringstream &inputString, std::string
     lock();
     
     if(!fs::exists(p)){
-        *stringBuffer = "ERR\n";
+        stringBuffer = "ERR\n";
         unlock();
         return;
     }
@@ -456,40 +456,40 @@ void del(std::string* stringBuffer, std::istringstream &inputString, std::string
 
     unlock();
 
-    *stringBuffer += "OK\n";
+    stringBuffer += "OK\n";
 }
 
-int stringCommandToEnum(std::string functionString){
+int stringCommandToInt(std::string functionString){
     if (functionString == "SEND") {
-        return 1;
+        return SEND;
     }
     
     if (functionString == "LIST") {
-        return 2;
+        return LIST;
     }
 
     if (functionString == "READ") {
-        return 3;
+        return READ;
     }
 
     if (functionString == "DEL") {
-        return 4;
+        return DEL;
     }
 
     if (functionString == "QUIT") {
-        return 5;
+        return QUIT;
     }
 
     if (functionString == "LOGIN") {
-        return 7;
+        return LOGIN;
     }
 
-    return 6;
+    return ERROR;
 }
 
-int sendMessage(std::string* stringBuffer){
+int sendMessage(){
 
-    const uint32_t  stringLength = htonl(stringBuffer->length());
+    const uint32_t  stringLength = htonl(stringBuffer.length());
     int bytesSent = -1;
 
     //sends length of upcoming message first
@@ -508,13 +508,13 @@ int sendMessage(std::string* stringBuffer){
 
     //now sends actual message
 
-    int bytesLeft = stringBuffer->length();
+    int bytesLeft = stringBuffer.length();
     int index = 0;
     bytesSent = -1;
 
     while(bytesLeft > 0){
         
-        bytesSent = send(current_socket, &stringBuffer->data()[index], bytesLeft, MSG_NOSIGNAL);
+        bytesSent = send(current_socket, &stringBuffer.data()[index], bytesLeft, MSG_NOSIGNAL);
         
         if(bytesSent == -1){
             perror("send error");
@@ -528,7 +528,7 @@ int sendMessage(std::string* stringBuffer){
     return true;
 }
 
-int receiveMessage(std::string* stringBuffer){
+int receiveMessage(){
 
     //first we receive length of upcoming message
     uint32_t  lengthOfMessage;
@@ -571,7 +571,7 @@ int receiveMessage(std::string* stringBuffer){
     }
 
     //load message into stringBuffer
-    stringBuffer->assign(receiveBuffer.data(), receiveBuffer.size());
+    stringBuffer.assign(receiveBuffer.data(), receiveBuffer.size());
 
     return true;
 }
@@ -598,8 +598,10 @@ void signalHandler(int sig) {
     if(sig == SIGUSR1){
         pid_t cpid;
         int status;
-        cpid = wait(&status);
-        printf("Child process with id %d exited with code %d\n", cpid, status);
+
+        if((cpid = wait(&status)) > 0){ //waits for child process to exit
+            printf("Child process with id %d exited with code %d\n", cpid, status);
+        }
         return;
     }
     

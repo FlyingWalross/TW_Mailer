@@ -13,21 +13,20 @@
 #include <ldap.h>
 #include "ldapAuthSrc/mypw.h"
 
+//commands
+#define SEND 1
+#define LIST 2
+#define READ 3
+#define DEL 4
+#define QUIT 5
+#define ERROR 6
+#define LOGIN 7
+
+int stringCommandToInt(std::string input); //enables switch case for commands
+
 int create_socket = -1;
 std::string stringBuffer;
 std::string input;
-
-//enables switch case for commands
-int stringCommandToEnum(std::string input);
-enum commands {
-    SEND = 1,
-    LIST = 2,
-    READ = 3,
-    DEL = 4,
-    QUIT = 5,
-    ERROR = 6,
-    LOGIN = 7
-};
 
 //reads line and adds it to stringBuffer
 void getLineToBuffer();
@@ -65,7 +64,8 @@ int main(int argc, char *argv[]) {
 
     printf("Connection with server (%s) established\n", inet_ntoa(address.sin_addr));
 
-    receiveMessage();
+    receiveMessage(); //receive Message from Server and copy message to stringBuffer
+    std::cout << "<< " << stringBuffer << "\n";
 
     //main loop
     //creates message from input, sends it to server, then waits for response
@@ -75,7 +75,7 @@ int main(int argc, char *argv[]) {
         getline(std::cin, input);
         stringBuffer = input + "\n";
 
-        switch (stringCommandToEnum(input)) {
+        switch (stringCommandToInt(input)) {
             
             case LOGIN:
                 printf("Enter username\n>> ");
@@ -122,9 +122,7 @@ int main(int argc, char *argv[]) {
             exit(EXIT_SUCCESS);
         }
 
-        //receive Message from Server and copy message to stringBuffer
-        receiveMessage();
-
+        receiveMessage(); //receive Message from Server and copy message to stringBuffer
         std::cout << "<< " << stringBuffer << "\n";
     }
 
@@ -231,30 +229,30 @@ void getLineToBuffer(){
     stringBuffer += input + "\n";
 }
 
-int stringCommandToEnum(std::string input){
+int stringCommandToInt(std::string input){
     if (input == "SEND") {
-        return 1;
+        return SEND;
     }
     
     if (input == "LIST") {
-        return 2;
+        return LIST;
     }
 
     if (input == "READ") {
-        return 3;
+        return READ;
     }
 
     if (input == "DEL") {
-        return 4;
+        return DEL;
     }
 
     if (input == "QUIT") {
-        return 5;
+        return QUIT;
     }
 
     if (input == "LOGIN") {
-        return 7;
+        return LOGIN;
     }
 
-    return 6;
+    return ERROR;
 }
