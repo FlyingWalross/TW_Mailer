@@ -20,10 +20,36 @@
 #include "ldapAuthSrc/ldapAuth.h"
 #include <chrono>
 
-#define MAX_FAILED_LOGIN_ATTEMPTS 2
-#define IP_BLACKLIST_TIME 60 //in seconds
+namespace fs = std::filesystem;
 
-//commands
+//--- Settings ---
+
+#define ENABLE_TEST_ACCOUNTS true //enable test accounts for login without LDAP authentication
+#define MAX_FAILED_LOGIN_ATTEMPTS 2 //number of failed login attempts before ip is blacklisted
+#define IP_BLACKLIST_TIME 60 //blacklist time (in seconds)
+
+//--- Signal handler ---
+
+void signalHandler(int sig);
+
+//--- Sockets and forking ---
+
+int create_socket = -1;
+int current_socket = -1;
+pid_t pid = -1;
+
+//--- Communication logic (sending and reveiving messages) ---
+
+std::string stringBuffer; //gloabl variable for input/output buffer
+std::string line;
+
+void connectionLogic(); //receives and sends messages to and from client
+
+int sendMessage(); //sends message from stringBuffer to client
+int receiveMessage(); //receives message from client and writes it to stringBuffer
+
+//--- Mailer logic ---
+
 #define SEND 1
 #define LIST 2
 #define READ 3
@@ -34,34 +60,7 @@
 
 int stringCommandToInt(std::string functionString); //enables switch case for commands
 
-//directory where the mail data will be stored, passed as argument when starting server
-char* dataDirectory;
-
-namespace fs = std::filesystem;
-int fileLock; //file descriptor for dataDirectory, used to lock entire filesystem
-void lock(); //lock filesystem
-void unlock(); //unlock filesystem
-
-void signalHandler(int sig);
-
-int create_socket = -1;
-int current_socket = -1;
-pid_t pid = -1;
-
-void connectionLogic();
-
-std::string stringBuffer; //gloabl variable for input/output buffer
-std::string line;
-
-//before sending the actual message, another message containing the size of the actual message is sent,
-//so that the client can allocate memory for the message and messages are not limited in size
-//by a fixed buffer
-int sendMessage(); //sends message from stringBuffer to client
-int receiveMessage(); //receives message from client and writes it to stringBuffer
-
 void mailerLogic(); //main logic for mailer functions
-bool checkUsername(std::string &username); //checks if username is valid
-bool checkSubject(std::string &subject); //checks if email subject is valid
 
 //functions for the different mailer commands, used in mailerLogic()
 void login(std::istringstream &inputString);
@@ -70,14 +69,26 @@ void list();
 void read(std::istringstream &inputString);
 void del(std::istringstream &inputString);
 
-//used for login and session
+bool checkUsername(std::string &username); //checks if username is valid
+bool checkSubject(std::string &subject); //checks if email subject is valid
+
+char* dataDirectory; //directory where the mail data will be stored
+
+int fileLock; //file descriptor for dataDirectory, used to lock entire filesystem
+void lock(); //lock filesystem
+void unlock(); //unlock filesystem
+
+//--- Session handling and blacklist ---
+
 bool loggedIn = false;
-std::string sessionUsername;
+std::string sessionUsername; //set once user is logged in
 std::string clientIP;
 
-bool checkIfIPisBlacklisted();
-void addFailedLoginAttempt();
-void addIPtoBlacklist();
+bool checkIfIPisBlacklisted(); //check if ip of currently connected client is blacklisted
+void addFailedLoginAttempt(); //add a failed login attempt to ip of currently connected client
+void addIPtoBlacklist(); //blacklist ip, automatically called by addFailedLoginAttempt() when ip had to many failed login attempts
+
+// --- Main ---
 
 int main(int argc, char *argv[]) {
 
@@ -265,8 +276,8 @@ void login(std::istringstream &inputString){
     std::getline(inputString, loginUsername);
     std::getline(inputString, loginPassword);
 
-    //Test accounts for debugging
-    if((loginUsername == "test1" || loginUsername == "test2") && loginPassword == "test"){
+    //test accounts for debugging
+    if((loginUsername == "test1" || loginUsername == "test2") && loginPassword == "test" && ENABLE_TEST_ACCOUNTS){
         printf("Client in child process %d sucessfully logged in as %s\n", getpid(), loginUsername.c_str());
         sessionUsername = loginUsername;
         loggedIn = true;
@@ -489,6 +500,10 @@ int stringCommandToInt(std::string functionString){
 
 int sendMessage(){
 
+    //before sending the actual message, another message containing the size of the actual message is sent,
+    //so that the client can allocate memory for the message and messages are not limited in size
+    //by a fixed buffer
+
     const uint32_t  stringLength = htonl(stringBuffer.length());
     int bytesSent = -1;
 
@@ -595,7 +610,7 @@ bool checkSubject(std::string &subject){
 
 void signalHandler(int sig) {
 
-    if(sig == SIGUSR1){
+    if(sig == SIGUSR1){ //custom signal, sent before child process exits
         pid_t cpid;
         int status;
 
@@ -625,14 +640,14 @@ void signalHandler(int sig) {
     exit(sig);
 }
 
-void lock(){ 
+void lock(){ //locks filesystem
     if(flock(fileLock, LOCK_EX) != 0){
         perror("flock");
         exit(EXIT_FAILURE);
     };
 }
 
-void unlock(){ 
+void unlock(){ //unlocks filesystem
     if(flock(fileLock, LOCK_UN) != 0){
         perror("flock");
         exit(EXIT_FAILURE);
@@ -647,11 +662,13 @@ bool checkIfIPisBlacklisted(){
 
     lock();
     
-    if(!fs::exists(p)){ //if ip is already blacklisted
+    if(!fs::exists(p)){ //if ip is not on blacklist
         unlock();
         return false;
     }
-    
+
+    //if ip is on blacklist, the timestamp is checked to see if blacklist ist still active
+
     std::string line;
     std::ifstream ipFile(p); 
     getline (ipFile, line);
@@ -659,11 +676,13 @@ bool checkIfIPisBlacklisted(){
     int timeOfBlacklist = stoi(line);
     const auto clockNow = std::chrono::system_clock::now();
     int currenttime = (int)std::chrono::duration_cast<std::chrono::seconds>(clockNow.time_since_epoch()).count();
-    if((currenttime - timeOfBlacklist) > IP_BLACKLIST_TIME){
-            fs::remove(p);
+    if((currenttime - timeOfBlacklist) > IP_BLACKLIST_TIME){ //if blacklist time is allready over
+            fs::remove(p); //remove ip from blacklist
             unlock();
             return false;
     }
+
+    //if blacklist time is not over yet
 
     printf("\nLogin attempt from blacklisted ip: %s\n", clientIP.c_str());
     printf("IP is blocked for %d more seconds\n", IP_BLACKLIST_TIME - (currenttime - timeOfBlacklist));
@@ -698,6 +717,7 @@ void addFailedLoginAttempt(){
         }
         ipFileRead.close();
 
+        //increase number of failed attempts by one
         std::ofstream ipFileWrite(p);
         ipFileWrite << numberOfFailedAttempts + 1 << "\n";
         ipFileWrite.close();
@@ -706,7 +726,7 @@ void addFailedLoginAttempt(){
     }
 
     //if file doesn't exist -> first failed attempt
-    //create file and write data to file
+    //create file and write 1 to file (first failed attempt)
     std::ofstream ipFile(p);
     ipFile << 1 << "\n";
 
